@@ -4,6 +4,22 @@ A pure MERN **Incident Management & On-Call Tracker** project for DevOps student
 
 This is a mini PagerDuty-style system where teams can report incidents, assign engineers, track status, capture investigation updates, and write/export postmortems.
 
+This script turns a fresh Ubuntu server into a fully working web application environment:
+
+Installs Node.js (backend JS runtime).
+
+Installs MongoDB (database).
+
+Sets up configuration files.
+
+Installs all required project packages.
+
+Loads example data into the database.
+
+Tells you how to start the app and where to access it.
+
+It’s designed for students or developers deploying a project on a cloud VM (like DigitalOcean, AWS, or local Ubuntu).
+
 ---
 
 ## Core Features
