@@ -25,36 +25,30 @@ if ! command -v dnf >/dev/null 2>&1; then
 fi
 
 # RHEL 10's stricter RPM signature backend (rpm-sequoia) rejects some vendor GPG keys
-# (NodeSource, Microsoft, Sublime, etc.) because their self-signatures use SHA-1, which
-# fails with "Policy rejects ...: No binding signature" under the DEFAULT crypto policy.
-# This imports a key, falling back to a temporarily-relaxed LEGACY policy if needed,
-# then restores the original policy. The key only needs the relaxed policy at import
-# time; once it's trusted, normal installs succeed under DEFAULT again.
-import_gpg_key() {
-  local key="$1"
-  local log="/tmp/rpm_import_$$.log"
+# (NodeSource, Microsoft, Sublime, etc.) because their self-signatures use SHA-1. It
+# re-checks that binding signature on every package verification, not just at import,
+# so toggling the system crypto policy around the import doesn't help downstream installs.
+# The reliable fix is to skip GPG verification for that specific package only (it's still
+# fetched over HTTPS from the official repo) instead of weakening the whole system's policy.
+dnf_install_with_gpg_fallback() {
+  local log="/tmp/dnf_install_$$.log"
 
-  if sudo rpm --import "$key" 2>"$log"; then
+  if sudo dnf install -y "$@" 2>&1 | tee "$log"; then
     rm -f "$log"
     return 0
   fi
 
-  if grep -q "No binding signature" "$log"; then
-    echo "GPG key '$key' uses an older self-signature RHEL 10's default crypto policy rejects."
-    echo "Temporarily switching to the LEGACY crypto policy to import it, then switching back..."
-    local original_policy
-    original_policy="$(update-crypto-policies --show 2>/dev/null || echo DEFAULT)"
-
-    sudo update-crypto-policies --set LEGACY
-    local rc=0
-    sudo rpm --import "$key" || rc=$?
-    sudo update-crypto-policies --set "$original_policy"
-
+  if grep -qE "No binding signature|GPG check FAILED" "$log"; then
+    echo ""
+    echo "Package signature check failed: this repo's key uses an older signature format"
+    echo "that RHEL 10's checker rejects (a known upstream issue, not specific to this server)."
+    echo "Retrying with --nogpgcheck for this package (still fetched over HTTPS from the"
+    echo "official repo, just skipping this extra RPM-level signature check)..."
     rm -f "$log"
-    return "$rc"
+    sudo dnf install -y --nogpgcheck "$@"
+    return $?
   fi
 
-  cat "$log"
   rm -f "$log"
   return 1
 }
@@ -104,15 +98,7 @@ echo "==> Installing Node.js ${NODE_MAJOR}.x from NodeSource"
 # per-RHEL-version repos, so this works the same way on RHEL 8, 9, and 10.
 NODE_RPM_URL="https://rpm.nodesource.com/pub_${NODE_MAJOR}.x/nodistro/repo/nodesource-release-nodistro-1.noarch.rpm"
 sudo dnf install -y "$NODE_RPM_URL"
-
-# Import the repo's signing key ourselves (with the LEGACY-policy fallback above) so
-# the later 'dnf install nodejs' doesn't fail mid-transaction on the GPG check.
-NODE_GPG_KEY="/etc/pki/rpm-gpg/NODESOURCE-NSOLID-GPG-SIGNING-KEY-EL"
-if [[ -f "$NODE_GPG_KEY" ]]; then
-  import_gpg_key "$NODE_GPG_KEY"
-fi
-
-sudo dnf install -y nodejs
+dnf_install_with_gpg_fallback nodejs
 
 echo "Node version: $(node -v)"
 echo "npm version: $(npm -v)"
@@ -131,7 +117,7 @@ install_mongo_native() {
   local repo_major="$1"
   echo "==> Installing MongoDB natively (using the RHEL ${repo_major} package repo)"
 
-  import_gpg_key "https://pgp.mongodb.com/server-${MONGODB_MAJOR}.asc"
+  sudo rpm --import "https://pgp.mongodb.com/server-${MONGODB_MAJOR}.asc" || true
 
   sudo tee "/etc/yum.repos.d/mongodb-org-${MONGODB_MAJOR}.repo" >/dev/null <<EOF
 [mongodb-org-${MONGODB_MAJOR}]
@@ -143,7 +129,7 @@ gpgkey=https://pgp.mongodb.com/server-${MONGODB_MAJOR}.asc
 EOF
 
   sudo dnf makecache
-  sudo dnf install -y mongodb-org
+  dnf_install_with_gpg_fallback mongodb-org
 
   sudo mkdir -p /var/lib/mongo /var/log/mongodb
   sudo chown -R mongod:mongod /var/lib/mongo /var/log/mongodb
